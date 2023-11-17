@@ -6,7 +6,15 @@ import pathlib
 import tempfile
 import subprocess
 
-def dir_path(path):
+def dir_path(path: str) -> None:
+    """Ensure argument is a directory
+
+    Args:
+        path (str): The string that should represent a path
+
+    Raises:
+        argparse.ArgumentTypeError: This will be raised if the passed argument is not a valid directory
+    """
     check_path = pathlib.Path(path)
 
     if check_path.is_dir():
@@ -16,6 +24,11 @@ def dir_path(path):
 
 
 def parse_args() -> argparse.Namespace:
+    """Helper function to define and parse arguments
+
+    Returns:
+        argparse.Namespace: A namespace with all of the parsed arguments
+    """
     parser = argparse.ArgumentParser(
         description="Extract set of videos from Wyze cameras based on time filter"
     )
@@ -64,6 +77,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def setup_logger(verbosity: int):
+    """Configure the logger
+
+    Args:
+        verbosity (int): An integer to define how much to increase verbosity.  Each step is an additional level of verbosity, maxing at debug.
+    """
     level = max([logging.WARNING - verbosity*10, 0])
     # log_fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     logging.basicConfig(level=level, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -73,6 +91,18 @@ def setup_logger(verbosity: int):
 
 
 def enumerate_video_segments(begin: datetime.datetime, end: datetime.datetime, path: pathlib.Path) -> list[pathlib.Path]:
+    """Given a path, return all video segments within the specified time range
+
+    Note, this is currently very fragile and depends on Wyze not changing their naming pattern.  If they do, this will fail spectacularly.
+
+    Args:
+        begin (datetime.datetime): A datetime object to represent the beginning of the period
+        end (datetime.datetime): A datetime object to represent the end of the period
+        path (pathlib.Path): A path-like object of where to look
+
+    Returns:
+        list[pathlib.Path]: A list of path-like objects corresponding to video segments within the range
+    """
     all_segments = path.rglob('*.mp4')
     matching_segments: set[pathlib.Path] = set()
     for segment in all_segments:
@@ -94,6 +124,8 @@ def enumerate_video_segments(begin: datetime.datetime, end: datetime.datetime, p
     return matching_segments
 
 def main():
+    """Do the needful
+    """
     args = parse_args()
     setup_logger(args.verbose)
 
