@@ -123,6 +123,15 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        '--brightness-change-threshold',
+        help="Percent change in overall frame brightness between sampled frames that is treated as a "
+             "lighting event (e.g. IR cut-filter switching, exposure jumps, clouds) rather than motion, "
+             "and ignored (default: 8.0)",
+        type=float,
+        default=8.0
+    )
+
+    parser.add_argument(
         '--buffer-local',
         help="Buffer segments to local temp storage to optimize SD card reads (default: False)",
         action='store_true'
@@ -195,10 +204,16 @@ def check_video_has_motion(
     threshold_percent: float,
     min_motion_duration: float,
     frame_skip: int,
-    crop_bottom: float
+    crop_bottom: float,
+    brightness_change_threshold: float
 ) -> bool:
-    """Scan a video file for motion and return True as soon as a significant 
+    """Scan a video file for motion and return True as soon as a significant
     motion segment is found.
+
+    Frame pairs whose overall brightness shifts by more than
+    brightness_change_threshold percent are treated as a lighting event
+    (IR cut-filter switch, exposure jump, passing cloud, etc.) rather than
+    motion, and are ignored so they don't register or extend a motion run.
     """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -211,6 +226,7 @@ def check_video_has_motion(
 
     motion_start_frame = None
     prev_gray = None
+    prev_brightness = None
     frame_idx = 0
     has_motion = False
 
@@ -221,7 +237,7 @@ def check_video_has_motion(
 
         if frame_idx % frame_skip == 0:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            
+
             # Crop bottom of the frame (e.g. to ignore timestamp overlays)
             if crop_bottom > 0:
                 h = gray.shape[0]
@@ -229,28 +245,41 @@ def check_video_has_motion(
                 if crop_h > 0:
                     gray = gray[:crop_h, :]
 
+            brightness = float(np.mean(gray))
             gray = cv2.GaussianBlur(gray, (21, 21), 0)
 
             if prev_gray is not None:
-                delta = cv2.absdiff(prev_gray, gray)
-                thresh = cv2.threshold(delta, 25, 255, cv2.THRESH_BINARY)[1]
-                non_zero = cv2.countNonZero(thresh)
-                total_pixels = gray.shape[0] * gray.shape[1]
-                percent = (non_zero / total_pixels) * 100.0
+                brightness_delta_pct = abs(brightness - prev_brightness) / max(prev_brightness, 1.0) * 100.0
 
-                if percent >= threshold_percent:
-                    if motion_start_frame is None:
-                        motion_start_frame = frame_idx
-                    else:
-                        dur = (frame_idx - motion_start_frame) / fps
-                        if dur >= min_motion_duration:
-                            has_motion = True
-                            break
-                else:
-                    # Reset motion sequence
+                if brightness_delta_pct >= brightness_change_threshold:
+                    # Global illumination shift rather than localized motion - ignore
+                    # this frame pair entirely so it doesn't start or extend a motion run.
+                    logging.debug(
+                        f"{video_path.name}: ignoring frame {frame_idx}, brightness shifted "
+                        f"{brightness_delta_pct:.1f}% (likely lighting change, not motion)"
+                    )
                     motion_start_frame = None
-            
+                else:
+                    delta = cv2.absdiff(prev_gray, gray)
+                    thresh = cv2.threshold(delta, 25, 255, cv2.THRESH_BINARY)[1]
+                    non_zero = cv2.countNonZero(thresh)
+                    total_pixels = gray.shape[0] * gray.shape[1]
+                    percent = (non_zero / total_pixels) * 100.0
+
+                    if percent >= threshold_percent:
+                        if motion_start_frame is None:
+                            motion_start_frame = frame_idx
+                        else:
+                            dur = (frame_idx - motion_start_frame) / fps
+                            if dur >= min_motion_duration:
+                                has_motion = True
+                                break
+                    else:
+                        # Reset motion sequence
+                        motion_start_frame = None
+
             prev_gray = gray
+            prev_brightness = brightness
 
         frame_idx += 1
 
@@ -352,7 +381,7 @@ def main():
         logging.warning("No video segments found matching criteria.")
         return
 
-    sorted_segments = sorted(segments)
+    sorted_segments = sorted(segments, key=get_segment_timestamp)
 
     if not args.motion_only:
         # Normal behavior (no motion filtering)
@@ -458,7 +487,8 @@ def main():
                             threshold_percent=args.motion_threshold,
                             min_motion_duration=args.min_motion_duration,
                             frame_skip=args.frame_skip,
-                            crop_bottom=args.crop_bottom
+                            crop_bottom=args.crop_bottom,
+                            brightness_change_threshold=args.brightness_change_threshold
                         )
                     except Exception as e:
                         logging.error(f"Error scanning {segment}: {e}")
@@ -476,7 +506,8 @@ def main():
                             threshold_percent=args.motion_threshold,
                             min_motion_duration=args.min_motion_duration,
                             frame_skip=args.frame_skip,
-                            crop_bottom=args.crop_bottom
+                            crop_bottom=args.crop_bottom,
+                            brightness_change_threshold=args.brightness_change_threshold
                         )
                     except Exception as e:
                         logging.error(f"Error scanning {segment}: {e}")
