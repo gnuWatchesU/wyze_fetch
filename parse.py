@@ -9,6 +9,16 @@ import shutil
 import json
 import cv2
 import numpy as np
+from rich.logging import RichHandler
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TaskProgressColumn,
+    TimeRemainingColumn,
+    MofNCompleteColumn,
+)
 
 def dir_path(path: str) -> pathlib.Path:
     """Ensure argument is a directory
@@ -153,7 +163,12 @@ def setup_logger(verbosity: int):
         verbosity (int): An integer to define how much to increase verbosity. Each step is an additional level of verbosity, maxing at debug.
     """
     level = max([logging.WARNING - verbosity*10, 0])
-    logging.basicConfig(level=level, format="%(asctime)s - %(levelname)s - %(message)s")
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
+    )
 
 
 def enumerate_video_segments(begin: datetime.datetime | None, end: datetime.datetime | None, path: pathlib.Path) -> list[pathlib.Path]:
@@ -461,99 +476,113 @@ def main():
 
     # Processing loop with signal interruption support
     try:
-        for segment in sorted_segments:
-            dt = get_segment_timestamp(segment)
-            segment_key = str(segment.resolve())
-            local_path_created = None
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            MofNCompleteColumn(),
+            TimeRemainingColumn(),
+        ) as progress:
+            task_id = progress.add_task("Processing segments", total=len(sorted_segments))
+            for segment in sorted_segments:
+                progress.update(task_id, description=f"Processing [bold cyan]{segment.name}[/bold cyan]")
+                dt = get_segment_timestamp(segment)
+                segment_key = str(segment.resolve())
+                local_path_created = None
 
-            # Check history cache
-            if segment_key in processed_dict:
-                has_motion = processed_dict[segment_key]["has_motion"]
-                logging.info(f"Using history for {segment.name} (has_motion={has_motion})")
-            else:
-                # Need to scan this segment
-                if args.buffer_local:
-                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as local_temp:
-                        local_temp_path = pathlib.Path(local_temp.name)
-                        temp_files_to_clean.append(local_temp_path)
-                        local_path_created = local_temp_path
-                    
-                    try:
-                        logging.info(f"Buffering {segment.name} locally...")
-                        shutil.copy(segment, local_temp_path)
-                        
-                        has_motion = check_video_has_motion(
-                            video_path=local_temp_path,
-                            threshold_percent=args.motion_threshold,
-                            min_motion_duration=args.min_motion_duration,
-                            frame_skip=args.frame_skip,
-                            crop_bottom=args.crop_bottom,
-                            brightness_change_threshold=args.brightness_change_threshold
-                        )
-                    except Exception as e:
-                        logging.error(f"Error scanning {segment}: {e}")
-                        has_motion = False
-                        local_temp_path.unlink(missing_ok=True)
-                        if local_temp_path in temp_files_to_clean:
-                            temp_files_to_clean.remove(local_temp_path)
-                        continue
+                # Check history cache
+                if segment_key in processed_dict:
+                    has_motion = processed_dict[segment_key]["has_motion"]
+                    logging.info(f"Using history for {segment.name} (has_motion={has_motion})")
                 else:
-                    # Direct scanning
-                    try:
-                        logging.info(f"Scanning {segment.name} directly...")
-                        has_motion = check_video_has_motion(
-                            video_path=segment,
-                            threshold_percent=args.motion_threshold,
-                            min_motion_duration=args.min_motion_duration,
-                            frame_skip=args.frame_skip,
-                            crop_bottom=args.crop_bottom,
-                            brightness_change_threshold=args.brightness_change_threshold
-                        )
-                    except Exception as e:
-                        logging.error(f"Error scanning {segment}: {e}")
-                        continue
-
-                # Record in history cache and save state
-                processed_dict[segment_key] = {
-                    "has_motion": has_motion,
-                    "scanned_at": datetime.datetime.now().isoformat()
-                }
-                save_history(history_path, history)
-
-            if has_motion:
-                # Resolve the path to use for the concatenation step
-                if args.buffer_local:
-                    if local_path_created is None:
-                        # Copy locally now since it was bypassed by using history
+                    # Need to scan this segment
+                    if args.buffer_local:
                         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as local_temp:
                             local_temp_path = pathlib.Path(local_temp.name)
                             temp_files_to_clean.append(local_temp_path)
                             local_path_created = local_temp_path
-                        logging.info(f"Buffering motion segment {segment.name} locally for merge...")
-                        shutil.copy(segment, local_temp_path)
-                    
-                    path_to_use = local_path_created
+                        
+                        try:
+                            logging.info(f"Buffering {segment.name} locally...")
+                            shutil.copy(segment, local_temp_path)
+                            
+                            has_motion = check_video_has_motion(
+                                video_path=local_temp_path,
+                                threshold_percent=args.motion_threshold,
+                                min_motion_duration=args.min_motion_duration,
+                                frame_skip=args.frame_skip,
+                                crop_bottom=args.crop_bottom,
+                                brightness_change_threshold=args.brightness_change_threshold
+                            )
+                        except Exception as e:
+                            logging.error(f"Error scanning {segment}: {e}")
+                            has_motion = False
+                            local_temp_path.unlink(missing_ok=True)
+                            if local_temp_path in temp_files_to_clean:
+                                temp_files_to_clean.remove(local_temp_path)
+                            progress.advance(task_id, 1)
+                            continue
+                    else:
+                        # Direct scanning
+                        try:
+                            logging.info(f"Scanning {segment.name} directly...")
+                            has_motion = check_video_has_motion(
+                                video_path=segment,
+                                threshold_percent=args.motion_threshold,
+                                min_motion_duration=args.min_motion_duration,
+                                frame_skip=args.frame_skip,
+                                crop_bottom=args.crop_bottom,
+                                brightness_change_threshold=args.brightness_change_threshold
+                            )
+                        except Exception as e:
+                            logging.error(f"Error scanning {segment}: {e}")
+                            progress.advance(task_id, 1)
+                            continue
+
+                    # Record in history cache and save state
+                    processed_dict[segment_key] = {
+                        "has_motion": has_motion,
+                        "scanned_at": datetime.datetime.now().isoformat()
+                    }
+                    save_history(history_path, history)
+
+                if has_motion:
+                    # Resolve the path to use for the concatenation step
+                    if args.buffer_local:
+                        if local_path_created is None:
+                            # Copy locally now since it was bypassed by using history
+                            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as local_temp:
+                                local_temp_path = pathlib.Path(local_temp.name)
+                                temp_files_to_clean.append(local_temp_path)
+                                local_path_created = local_temp_path
+                            logging.info(f"Buffering motion segment {segment.name} locally for merge...")
+                            shutil.copy(segment, local_temp_path)
+                        
+                        path_to_use = local_path_created
+                    else:
+                        path_to_use = segment
+
+                    # Check if this clip belongs to the current contiguous block
+                    if current_group:
+                        prev_path, prev_dt = current_group[-1]
+                        gap = (dt - prev_dt).total_seconds()
+                        if gap > args.min_static_duration:
+                            # Gap detected! Merge the current group immediately.
+                            merge_current_group()
+
+                    current_group.append((path_to_use, dt))
                 else:
-                    path_to_use = segment
+                    # Segment has no motion. Clean up the temp file if created
+                    if local_path_created is not None:
+                        local_path_created.unlink(missing_ok=True)
+                        if local_path_created in temp_files_to_clean:
+                            temp_files_to_clean.remove(local_path_created)
 
-                # Check if this clip belongs to the current contiguous block
-                if current_group:
-                    prev_path, prev_dt = current_group[-1]
-                    gap = (dt - prev_dt).total_seconds()
-                    if gap > args.min_static_duration:
-                        # Gap detected! Merge the current group immediately.
-                        merge_current_group()
+                progress.advance(task_id, 1)
 
-                current_group.append((path_to_use, dt))
-            else:
-                # Segment has no motion. Clean up the temp file if created
-                if local_path_created is not None:
-                    local_path_created.unlink(missing_ok=True)
-                    if local_path_created in temp_files_to_clean:
-                        temp_files_to_clean.remove(local_path_created)
-
-        # End of loop: merge any remaining active group
-        merge_current_group()
+            # End of loop: merge any remaining active group
+            merge_current_group()
 
     except (KeyboardInterrupt, SystemExit):
         logging.warning("Script interrupted. Performing graceful shutdown and merging completed segments...")
